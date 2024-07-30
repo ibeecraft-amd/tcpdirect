@@ -166,6 +166,11 @@ zf_tcp_timers_timer_start(struct zf_tcp* tcp, int timer_type,
   pcb->timers.running |= 1u << timer_type;
   pcb->timers.expiry[timer_type] = delay + current_tick;
   zf_tcp_timers_postpone(tcp);
+
+  zf_log_timer_trace(stack,
+      delay + current_tick <
+      current_tick + zf_timekeeping_elapsed_ticks(&stack->times.time) ?
+      "Timer expires before 'next' tick\n" : "" );
 }
 
 ZF_HOT static inline void
