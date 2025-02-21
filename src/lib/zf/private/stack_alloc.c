@@ -243,12 +243,12 @@ static int zf_stack_init_pio(struct zf_stack_impl* sti, struct zf_attr* attr,
   struct zf_stack_res_nic* sti_nic = &sti->nic[nicno];
   ef_vi* vi = zf_stack_nic_tx_vi(st_nic);
 
-  if( st_nic->vi.nic_type.arch == EF_VI_ARCH_EFCT &&
+  if( sti_nic->flags & ZF_RES_NIC_FLAG_CTPIO_ONLY &&
       attr->pio >= PIO_MUST_USE ) {
     zf_log_stack_warn(st,
-                      "PIO not supported by efct interface but pio=%d. "
+                      "PIO not supported by %s but pio=%d. "
                       "Not attempting to allocate PIO buffer.\n",
-                      attr->pio);
+                      sti_nic->if_name, attr->pio);
     st_nic->pio.busy = 3;
     return 0;
   }
@@ -492,7 +492,7 @@ static int zf_stack_init_nic_capabilities(struct zf_stack* st, int nicno)
 {
   struct zf_stack_impl* sti = ZF_CONTAINER(struct zf_stack_impl, st, st);
   unsigned long vlan_filters;
-  unsigned long variant;
+  unsigned long variant, variant2;
   ef_driver_handle dh = sti->nic[nicno].dh;
   ef_pd* pd = &sti->nic[nicno].pd;
   int rc;
@@ -500,7 +500,16 @@ static int zf_stack_init_nic_capabilities(struct zf_stack* st, int nicno)
   sti->nic[nicno].flags = 0;
 
   rc = ef_pd_capabilities_get(dh, pd, dh, EF_VI_CAP_RX_FW_VARIANT, &variant);
-  if( rc != 0 ) {
+  if( rc == -EOPNOTSUPP ) {
+    rc = ef_pd_capabilities_get(dh, pd, dh, EF_VI_CAP_RX_SHARED, &variant2);
+    if( rc != 0 ) {
+      zf_log_stack_err(st, "Unknown RX mode for interface %s (rc %d)\n",
+                           sti->nic[nicno].if_name, rc);
+      return -EOPNOTSUPP;
+    }
+    sti->nic[nicno].flags |= ZF_RES_NIC_FLAG_SHARED_RXQ;
+  }
+  else if ( rc != 0 ) {
     zf_log_stack_err(st, "Failed to query RX mode for interface %s (rc %d)\n",
                          sti->nic[nicno].if_name, rc);
     return rc;
@@ -515,7 +524,16 @@ static int zf_stack_init_nic_capabilities(struct zf_stack* st, int nicno)
     sti->nic[nicno].flags |= ZF_RES_NIC_FLAG_RX_LL;
 
   rc = ef_pd_capabilities_get(dh, pd, dh, EF_VI_CAP_TX_FW_VARIANT, &variant);
-  if( rc != 0 ) {
+  if( rc == -EOPNOTSUPP ) {
+    rc = ef_pd_capabilities_get(dh, pd, dh, EF_VI_CAP_CTPIO_ONLY, &variant2);
+    if( rc != 0 ) {
+      zf_log_stack_err(st, "Unknown TX mode for interface %s (rc %d)\n",
+                           sti->nic[nicno].if_name, rc);
+      return -EOPNOTSUPP;
+    }
+    sti->nic[nicno].flags |= ZF_RES_NIC_FLAG_CTPIO_ONLY;
+  }
+  else if( rc != 0 ) {
     zf_log_stack_err(st, "Failed to query TX mode for interface %s (rc %d)\n",
                          sti->nic[nicno].if_name, rc);
     return rc;
@@ -574,8 +592,9 @@ int zf_stack_init_nic_resources(struct zf_stack_impl* sti,
   if( rc < 0 )
     goto fail1;
 
-  if( !(sti->nic[nicno].flags & ZF_RES_NIC_FLAG_RX_LL) ||
-      !(sti->nic[nicno].flags & ZF_RES_NIC_FLAG_TX_LL) ) {
+  if( (!(sti_nic->flags & ZF_RES_NIC_FLAG_RX_LL) ||
+      !(sti_nic->flags & ZF_RES_NIC_FLAG_TX_LL)) &&
+      !(sti_nic->flags & ZF_RES_NIC_FLAG_SHARED_RXQ) ) {
     zf_log_stack_warn(st, "Interface %s is not in low latency mode.\n",
                           sti->nic[nicno].if_name);
     zf_log_stack_warn(st, "Low latency mode is recommended for best "
@@ -636,9 +655,9 @@ int zf_stack_init_nic_resources(struct zf_stack_impl* sti,
   );
 
   if ( attr->rx_ring_max != 0 ) {
-    /* For EFCT, we store the timestamp in a fake prefix when copying from
-     * the shared rx buffer into our own packet buffer. */
-    if( st_nic->vi.nic_type.arch == EF_VI_ARCH_EFCT )
+    /* For shared rxqs, we store the timestamp in a fake prefix when copying
+     * from the shared rx buffer into our own packet buffer. */
+    if( sti_nic->flags & ZF_RES_NIC_FLAG_SHARED_RXQ )
       st_nic->rx_prefix_len = ES_DZ_RX_PREFIX_SIZE;
     else
       st_nic->rx_prefix_len = ef_vi_receive_prefix_len(&st_nic->vi);
